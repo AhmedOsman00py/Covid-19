@@ -1,0 +1,647 @@
+---
+title: "Analyse de la pandémie de COVID-19 aux États-Unis"
+author: "Ahmed Osman"
+date: 
+output: 
+  html_document:
+    rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Présentation du Projet
+
+Dans ce projet, on utilisera plusieurs données liées au COVID-19 aux États-Unis .
+L'objectif principal est de répondre à certaines questions qui seront posées (section 4) en explorant ces données réelles et en appliquant les techniques de visualisation de données.    
+Pour faire cela, nous devrons d'abord rendre les données au format "tidy".
+
+On trouvera dans ces données, la population pour chaque État, le nombre de personnes inféctées, décédées, ...
+
+## Packages Utilisés
+
+Ces packages sont les packages initiales qu'on utilisera tout au long de notre projet, il se peut qu'on chargera d'autre package dans la suite pour utiliser quelques fonctions...
+
+```{r}
+library(tidyverse)
+library(lubridate)
+# pour la lecture des fichiers excel
+library(readxl)
+```
+
+# 1 - Importations des données et modifications
+
+## COVID-19 :
+
+Ce jeu de données contients des informations sur le nombre de personne inféctés, décédées et guéris, ... du COVID-19 aux États-Unis.
+
+source des données : https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_daily_reports_us   
+page web : https://coronavirus.jhu.edu/us-map   
+
+```{r}
+# on récupère les fichiers csv
+COVID_data_path <- "csse_covid_19_daily_reports_us/"
+COVID_data_files <- list.files(path = "csse_covid_19_daily_reports_us/")
+
+COVID_data <- tibble()
+date <- c()
+for (i in 1:length(COVID_data_files)) {
+  
+  # on crée notre dataframe
+  file <- paste0(COVID_data_path, COVID_data_files[i])
+  newfile <- read_csv(file, show_col_types = FALSE)
+  COVID_data <- COVID_data %>% bind_rows(newfile)
+  
+  # on récupère la date (le nom des fichiers)
+  n <- nrow(newfile)
+  # on se débarasse des ".csv"
+  date <- c(date, rep(str_sub(COVID_data_files[i], 1, 10), n))
+}
+
+# on ajoute "date" à la table "COVID_data"
+date <- tibble(date)
+COVID_data <- bind_cols(date, COVID_data)
+# On enlève les variables dont on en a plus besoin
+rm(COVID_data_files, COVID_data_path, file, newfile, n, date)
+
+head(COVID_data)
+```
+
+Après avoir importer notre jeu de données, on "nettoie" (séléctionne, filtre, corrige..) les données, pour rendre cette table au format **`tidy`**.
+
+```{r}
+# correction des types des colonnes qui nous intéresse
+COVID_data <- COVID_data %>% 
+  # correction du type de la variable date
+  mutate(date = mdy(date)) %>% 
+  # correction des types des colonnes
+  mutate(Confirmed = as.integer(Confirmed), 
+         Deaths = as.integer(Deaths), 
+         Recovered = as.integer(Recovered), 
+         Active = as.integer(Active)) %>% 
+  # rennomage des colonnes
+  rename(state = Province_State, confirmed = Confirmed,
+         deaths = Deaths, recovered = Recovered, active = Active) %>%
+  # On séléctionne les colonnes qui nous intéresse
+  select(date, state, confirmed, deaths, recovered, active)
+
+# On remarque que "Recovered" est dans la colonne State par erreur, on souhaite donc 
+# l'enlever
+COVID_data <- COVID_data %>%
+  filter(state != "Recovered")
+
+head(COVID_data)
+```
+
+
+## Population des États-Unis :
+
+Ce jeu de données contients des informations sur la population pour chaque État aux États-Unis.
+
+source des données : https://data.ers.usda.gov/reports.aspx?ID=17827
+
+```{r}
+# importations des données
+pop_data <- read_xlsx("PopulationReport.xlsx")
+
+pop_data <- pop_data %>% 
+  # On séléctionne les colonnes qui nous intéresse
+  select(state = Name, population = `Pop. 2020`) %>% 
+  # les deux dernières lignes n'ont aucun rapport avec la population aux US
+  filter(population != is.na(population))
+
+head(pop_data)
+```
+
+## Vaccinations :
+
+Ce jeu de données contients des informations sur le nombre de personnes vaccinnées "v" au jour "j" pour chaque État aux États-Unis.
+
+source des données : https://ourworldindata.org/us-states-vaccinations
+
+```{r}
+vacc_data <- read_csv("us_state_vaccinations.csv", show_col_types = FALSE)
+
+# On corrige le nom de l'État "New York State" par "New york" pour empêcher les 
+# erreurs de jointures qu'on fera aux étapes suivantes.
+
+vacc_data$location[vacc_data$location == "New York State"] <-  "New York"
+
+vacc_data <- vacc_data %>% 
+  # correction 
+  mutate(date = ymd(date),
+         daily_vaccinations = as.numeric(daily_vaccinations)) %>% 
+  # séléction
+  select(state = location,
+         date = date,
+         vaccinations = daily_vaccinations)
+
+head(vacc_data)
+```
+
+## Régions et noms des Etats-Unis :
+
+Cet ensemble de données contient des informations sur les noms des États-Unis et de leurs régions. On va se référer sur cette base de données et y faire des jointures dessus, nous avons donc besoin de ces données.
+
+source des données : https://www.kaggle.com/omer2040/usa-states-to-region
+
+```{r}
+# importation
+states_data <- read.csv("states.csv")
+
+# On séléctionne les colonnes qui nous intéresse
+states_data <- states_data %>% 
+  select(state = State, region = Region)
+
+head(states_data)
+```
+
+
+# 2 - pré-Analyse des données
+
+On veut vérifier l'ensemble des données pricipale et on s'intéresse aux variables principales **`("confirmed", "deaths", "recovered", "active")`**. 
+On veut donc savoir si les données sont cohérentes au niveau des États-Unis et à un niveau pour un État séléctionné.
+
+### Au niveau des États-Unis :
+
+```{r}
+COVID_data %>% 
+  # séléction des variables principales
+  select(state,date, confirmed:active) %>% 
+  # on transforme la table du format "wide" au format "long"
+  pivot_longer(cols = c("confirmed", "deaths", "recovered", "active"), 
+               names_to = "variables", 
+               values_to = "valeurs") %>% 
+  # graphique des valeurs en fonction de la date
+  ggplot(aes(x = date,
+             y = valeurs,
+             color = variables)) +
+  geom_point() +
+  facet_grid(variables ~ ., 
+             scales = "free")
+```
+
+### Au niveau de l'État Californie :
+
+```{r}
+COVID_data %>% 
+  # séléction des variables principales
+  select(state,date, confirmed:active) %>% 
+  # on choisi que les observations de "California"
+  filter(state == "California") %>% 
+  # on transforme la table du format "wide" au format "long"
+  pivot_longer(cols = c("confirmed", "deaths", "recovered", "active"), 
+               names_to = "variables", 
+               values_to = "valeurs") %>% 
+  # graphique des valeurs en fonction de la date
+  ggplot(aes(x = date,
+             y = valeurs,
+             color = variables)) +
+  geom_point() +
+  facet_grid(variables ~ ., 
+             scales = "free")
+```
+
+On remarque, d'après les graphiques précédents, que les données des variables **`active`** et **`recovered`** sont incomplètes (données manquantes : on a pas des données suffisantes pour ces variables).
+On s'intéressera donc qu'aux variables **`confirmed`** et **`deaths`**.
+
+De plus, on voit que la colonne **`confirmed`** est le nombre total de personnes inféctées.
+
+
+# 3 - Création de la table principale 
+
+On va maintenant créer une seule table. Cette table contiendra les colonnes qui nous intéressent seulement.
+Chaque observations aura comme identifiant une date unique pour chaque État, ainsi l'ID de cette table sera composé de l'ensemble **`(date, state)`**.
+
+## 3.1 - Jointures
+
+Pour créer cette table, on a besoin d'éffectués des jointures.
+On va donc se référer sur la table **`states_data`** et on effectuera les jointures dessus.
+
+```{r}
+# table states_data
+head(states_data)
+
+data <- states_data %>% 
+  # on ordonne la table states_data
+  arrange() %>% 
+  
+  # on a joute un id pour chaque state
+  mutate(state_id = row_number()) %>% 
+  
+  # on effectue les jointures
+  left_join(COVID_data, by = "state") %>% 
+  left_join(pop_data, by = "state") %>% 
+  left_join(vacc_data, by = c("state", "date")) %>% 
+  
+  # séléction des colonnes
+  select(state_id, state, region, date:active, vaccinations, population) %>% 
+  
+  # on renomme les colonne
+  rename(`confirmed total` = confirmed,
+         `deaths total` = deaths,
+         `daily vaccine doses` = vaccinations)
+
+head(data)
+```
+
+
+## 3.2 - Opérations sur la table principales
+
+Ce que l'on voudrait faire :
+
+- ajouter une variable qui compte la population en millions 
+
+- calculer le nombre quotidien de cas "confirmed", "deaths". 
+
+- vérifier les valeurs manquantes et les corriger si possible 
+
+- obtenir la première date de vaccinations pour chaque État (date de sortie du vaccin) 
+
+- vérifier si on a des valeurs négatives 
+
+
+### Valeurs manquantes :
+
+```{r}
+# valeurs manquantes pour les variables "confirmed total" et "deaths total"
+data %>% filter(is.na(`confirmed total`)) %>% nrow()
+data %>% filter(is.na(`deaths total`)) %>% nrow()
+
+# valeurs manquantes pour les vaccinations 
+data %>% filter(is.na(`daily vaccine doses`)) %>% nrow()
+```
+
+La vaccination a commencé beaucoup plus tard après le début du COVID-19, nous nous attendions donc à des valeurs manquantes.
+On peut donc remplacer ces valeurs manquantes par 0. (pas de vaccinations au jour "j")
+
+### Première date de vaccinations :
+
+```{r}
+# 1ère date de vaccination pour chaque État
+date.min.vacc.state <- data %>% 
+  filter(!is.na(`daily vaccine doses`)) %>% 
+  group_by(state) %>% 
+  summarise(min_date = min(date)) %>% 
+  ungroup()
+
+head(date.min.vacc.state)
+```
+On voit d'après la table précédente que les personnes ont commencé à prendre le vaccin le **`"13-01-2021"`** pour la plupart des States.
+
+### Opérations restantes :
+
+```{r}
+data <- data %>% 
+  # population de chaque Étatn en millions
+  mutate(`population in millions` = round(population / 10**6, 2)) %>%       
+  
+  # on remplace les NA par 0
+  mutate(`daily vaccine doses` = replace_na(`daily vaccine doses`, 0)) %>% 
+  
+  # calcul quotidient des variables : total(date actuelle) -  total(date précédente)
+  group_by(state) %>% 
+  mutate(`confirmed daily cases`  = `confirmed total` - lag(`confirmed total`, 1),
+         `deaths daily cases`     = `deaths total`    - lag(`deaths total`, 1)) %>% 
+
+  # calcul du nombre total au fil du temps : somme du premier jusqu'au dernier
+  mutate(`vaccine doses total` = cumsum(`daily vaccine doses`)) %>% 
+  ungroup() %>% 
+  
+  # rearrange columns
+  select(state_id:date,
+         `confirmed total` , `confirmed daily cases`,
+         `deaths total`    , `deaths daily cases`,
+         `vaccine doses total`, `daily vaccine doses`,
+         population, `population in millions`,
+         everything())
+
+head(data)
+```
+
+
+### Valeurs négatives
+
+```{r}
+data %>% filter(`confirmed daily cases` < 0) %>% head()
+
+# On fait pareil pour les autres variables
+# data %>% filter(`deaths daily cases` < 0)
+# data %>% filter(`daily vaccine doses` < 0)
+
+# on remplace ces valeurs négatives par 0
+data$`confirmed daily cases`[data$`confirmed daily cases` < 0] <- 0
+data$`deaths daily cases`[data$`deaths daily cases` < 0] <- 0
+data$`daily vaccine doses`[data$`daily vaccine doses` < 0] <- 0
+```
+
+
+
+# 4 - Questions
+
+Cette section représente les questions qu'on peut se poser.
+
+### 1 - Trouver le nombre d'états par région et représenter les graphiquement.
+
+```{r}
+data %>% 
+  group_by(region) %>% 
+  summarise(states = n_distinct(state)) %>% 
+  ungroup()
+```
+
+```{r}
+# on ajoute le nom des états en minuscule pour faire une jointure et obtenir 
+# des données géographiques
+data <- data %>% 
+  mutate(state_ = tolower(state))
+
+# dernière date dans les données (la plus récente)
+max.date <- data %>% pull(date) %>% max(.)
+
+# afficher les états sur la carte (map) selon la dernière date
+# (couleur de l'état définie par région)
+data %>% 
+  filter(date == ymd(max.date)) %>% 
+  # obtenir les données de longitude et de latitude
+  left_join(x = .,
+            y = map_data("state"),
+            by = c("state_" = "region")) %>% 
+  ggplot(aes(x = long, y = lat,
+             group = group)) +
+  geom_polygon(aes(fill = region), 
+               color = "black")
+```
+
+### 2 - Que se passe-t-il avec le nombre total de personnes infectées/décédées (nombre absolu/relatif) au fil du temps au niveau de l'État ?
+
+Le nombre relatif s'obtient en calculant le pourcentage calculé à partir de la population de l'État. (le nombre total divisé par la population)
+
+```{r}
+# On ajoute donc le nombre de personne infectées/décédées
+data <- data %>% 
+  mutate(`confirmed total %` = `confirmed total` / population,
+         `deaths total %` = `deaths total` / population)
+```
+
+On va s'intéresser à une région pour ne pas avoir beaucoup de graphiques, donc par exemple la région du **`Midwest`**.
+
+### Pour les États de la région du Midwest : 
+
+On va donc tracer les graphiques des États pour chaque région du Midwest.
+
+```{r}
+# nombre absolu de cas inféctés
+p11 <- data %>% filter(region == "Midwest") %>% distinct() %>% 
+  ggplot(aes(x = date, 
+             y = `confirmed total`,
+             group = state ,
+             color = state)) +
+  geom_line(show.legend = F) +
+  xlab("Date") +
+  ylab("Nombre total de cas inféctés")
+
+# nombre relatif de cas inféctés
+p21 <- data %>% filter(region == "Midwest") %>% distinct() %>% 
+  ggplot(aes(x = date, 
+             y = `confirmed total %`,
+             group = state,
+             color = state)) +
+  geom_line(show.legend = F) +
+  xlab("Date") +
+  ylab("% de cas confirmés au total")
+
+# Nombre absolu de décès
+p12 <- data %>% filter(region == "Midwest") %>% distinct() %>% 
+  ggplot(aes(x = date, 
+             y = `deaths total`,
+             group = state,
+             color = state)) +
+  geom_line() +
+  xlab("Date") +
+  ylab("Nombre total de décès")
+
+# nombre relatif de décès
+p22 <- data %>% filter(region == "Midwest") %>% distinct() %>% 
+  ggplot(aes(x = date, 
+             y = `deaths total %`,
+             group = state,
+             color = state)) +
+  geom_line() +
+  xlab("Date") +
+  ylab("% du total des décès")
+
+#p11;p12;p21;p22
+#cowplot::plot_grid(p11, p12, p21, p22)
+gridExtra::grid.arrange(p11, p12, nrow = 2)
+gridExtra::grid.arrange(p21, p22, nrow = 2)
+```
+Avec **`%`** qui signifie le pourcentage... (% de cas confirmés = pourcentage de cas confirmés)
+
+On fait de même avec les autres régions. Même code que précédemment mais on change **`"Midewest"`** par la nouvelle région. (**`South`** par exemple) 
+
+### Pour tous les États-Unis :
+
+On va maintenant tracer un graphique à barres pour le nombre total relatif de personnes infectées/décédées au fil du temps au niveau des État-Unis.
+
+### Graphique à barres
+
+Pour les nombres relatifs :
+
+```{r}
+# Graphique à barres - Nombre relatifs
+data %>% 
+  # la date la plus récente
+  filter(date == max.date) %>% 
+  # colonnes qui nous intéressent
+  select(region, state, `confirmed total %`, `deaths total %`) %>% 
+  # transformation des données au format longer
+  pivot_longer(cols = c("confirmed total %", "deaths total %"), 
+               names_to = "count", 
+               values_to = "value") %>% 
+  # on trie les états
+  group_by(state) %>% 
+  mutate(tot_percentage = sum(value)) %>% 
+  ungroup() %>% 
+  arrange(tot_percentage, state) %>% 
+  mutate(state = as.factor(state),
+         state = fct_inorder(state)) %>% 
+  # création du plot
+  ggplot(aes(y = state,
+             x = value,
+             fill = region)) +
+  geom_col(color = "black") +
+  facet_wrap(count ~ .,
+             scales = "free") +
+  xlab("Pourcentage de la population de l'État") +
+  ylab("État") +
+  ggtitle("Cas infectés et décès par rapport à la population de l'État") +
+  scale_fill_viridis_d()
+```
+
+Maintenant on fait pareil pour le nombre total absolu de personnes infectées/décédées au fil du temps au niveau des État-Unis.
+
+Pour les nombres absolus :
+
+```{r}
+# Graphique à barres - Nombre absolus
+data %>% 
+  # la date la plus récente
+  filter(date == max.date) %>% 
+  # colonnes qui nous intéressent
+  select(region, state, `confirmed total`, `deaths total`) %>% 
+  # transformation des données au format long
+  pivot_longer(cols = c("confirmed total", "deaths total"), 
+               names_to = "count", 
+               values_to = "value") %>% 
+  # on trie les états
+  group_by(state) %>% 
+  mutate(tot_percentage = sum(value)) %>% 
+  ungroup() %>% 
+  arrange(tot_percentage, state) %>% 
+  mutate(state = as.factor(state),
+         state = fct_inorder(state)) %>% 
+  # création du plot
+  ggplot(aes(y = state,
+             x = value,
+             fill = region)) +
+  geom_col(color = "black") +
+  facet_wrap(count ~ .,
+             scales = "free") +
+  xlab("Nombre de cas") +
+  ylab("État") +
+  ggtitle("Nombre absolu de cas infectés et de décès") +
+  scale_fill_viridis_d()
+```
+
+### Graphique Map
+
+```{r}
+# création de la map - nombre relatifs
+p1 <- data %>% 
+  filter(date == max.date) %>% 
+  # on séléctionne les colonnes qui nous intéressent
+  select(region, state, `confirmed total %`, `deaths total %`) %>% 
+  # convertir les noms d'états en minuscules
+  mutate(state_ = tolower(state)) %>%
+  # obtenir la longitude et la latitude
+  left_join(x = .,
+            y = map_data("state"),
+            by = c("state_" = "region")) %>% 
+  ggplot(aes(x = long, y = lat,
+             group = group)) +
+  geom_polygon(aes(fill = `deaths total %`), 
+               color = "black") +
+  xlab("") +
+  ylab("") +
+  ggtitle("Pourcentage de décès par rapport à la population de l'État") +
+  scale_fill_gradient(low = "white", high = "black") +
+  theme_bw() +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank())
+
+p2 <- data %>% 
+  filter(date == max.date) %>% 
+  # on séléctionne les colonnes qui nous intéressent
+  select(region, state, `confirmed total %`, `deaths total %`) %>% 
+  # convertir les noms d'états en minuscules
+  mutate(state_ = tolower(state)) %>% 
+  # obtenir la longitude et la latitude
+  left_join(x = .,
+            y = map_data("state"),
+            by = c("state_" = "region")) %>% 
+  ggplot(aes(x = long, y = lat,
+             group = group)) +
+  geom_polygon(aes(fill = `confirmed total %`), 
+               color = "black") +
+  xlab("") +
+  ylab("") +
+  ggtitle("Pourcentage de personnes infectées par rapport à la population de l'État") +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_bw() +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank())
+
+cowplot::plot_grid(p1, p2, nrow = 2)
+```
+
+### 3 - Afficher sur la carte comment le nombre de cas de COVID a changé au fil du temps
+
+On va créer des aperçus mensuels (tous les 30 jours un aperçu), ensuite on va afficher les subplots pour chaque aperçus mensuel en montrant le nombre de cas de COVID pour chaque État.
+
+```{r}
+data <- data %>% 
+  arrange(state, date) %>% 
+  # on ajoute un id. de date pour chaque état 
+  group_by(state) %>% 
+  mutate(date_id = row_number()) %>% 
+  ungroup() %>% 
+  # ajouter un indicateur de l'aperçu de date pour chaque 30ème date
+                                          # inclure la première date
+  mutate(`date each 30d` = case_when(date_id == 1 ~ TRUE, 
+                                          # inclure la dernière date
+                                          date == max.date ~ TRUE,
+                                          # inclure la 30ème date
+                                          date_id %% 30 == 0 ~ TRUE,
+                                          T ~ FALSE))
+```
+
+### Nombre total de cas au fil du temps
+
+```{r}
+# création de la map
+data %>% 
+  filter(`date each 30d`) %>% 
+  # séléction des colonne qui nous intéressent
+  select(region, state, date, `confirmed total`) %>% 
+  # convertir les noms d'états en minuscules
+  mutate(state_ = tolower(state)) %>% 
+  # obtenir la longitude et la latitude
+  left_join(x = .,
+            y = map_data("state"),
+            by = c("state_" = "region")) %>% 
+  ggplot(aes(x = long, y = lat,
+             group = group)) +
+  geom_polygon(aes(fill = `confirmed total`), 
+               color = "black") +
+  facet_wrap(. ~ date) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Nombre total de cas au fil du temps") +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_bw() +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank())
+```
+
+### 4 - Afficher sur la carte comment le nombre total de doses de vaccination a augmenté au fil du temps
+
+On va créer des aperçus mensuels (tous les 30 jours un aperçu), ensuite on va afficher les subplots pour chaque aperçus mensuels en montrant le nombre total de doses de vaccin pour chaque État.
+
+```{r}
+# création de la map
+data %>% 
+  filter(`date each 30d`) %>% 
+  # séléction des colonne qui nous intéressent
+  select(region, state, date, `vaccine doses total`) %>% 
+  # convertir les noms d'états en minuscules
+  mutate(state_ = tolower(state)) %>% 
+  # obtenir la longitude et la latitude
+  left_join(x = .,
+            y = map_data("state"),
+            by = c("state_" = "region")) %>% 
+  ggplot(aes(x = long, y = lat,
+             group = group)) +
+  geom_polygon(aes(fill = `vaccine doses total`), 
+               color = "black") +
+  facet_wrap(. ~ date) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Nombre de doses de vaccin au fil du temps") +
+  scale_fill_gradient(low = "white", high = "green") +
+  theme_bw() +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank())
+```
+
